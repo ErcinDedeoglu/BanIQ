@@ -1,0 +1,31 @@
+version: '3.5'
+
+services:
+  fail2ban:
+    build: 
+      context: ./fail2ban
+    privileged: true # or use cap_add: [NET_ADMIN] to manage iptables
+    container_name: fail2ban-golang
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./fail2ban/filter.d:/etc/fail2ban/filter.d:ro
+      - ./fail2ban/jail.d:/etc/fail2ban/jail.d
+      # In a real setup, you might also mount logs from other containers 
+      # if you want to read them directly.
+    # No port mapping needed unless you want to expose something
+    # ports:
+    #   - "8080:8080"
+
+  example-service:
+    build:
+      context: ./example-service
+    labels:
+      # Our custom label schema for dynamic Fail2ban
+      "fail2ban.filter": "traefik-auth"
+      "fail2ban.logpath": "/var/log/traefik/access.log"
+      "fail2ban.bantime": "600"
+      "fail2ban.findtime": "600"
+      "fail2ban.maxretry": "3"
+      "fail2ban.chain": "DOCKER-USER"
+    volumes:
+      - ./logs:/var/log/traefik
