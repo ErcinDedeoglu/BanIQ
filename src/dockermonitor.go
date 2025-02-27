@@ -92,7 +92,7 @@ func (m *DockerMonitor) handleContainerStart(ctx context.Context, containerId st
 
 	// Check if BanIQ is enabled for this container
 	if enabled, ok := container.Config.Labels[labelEnabled]; !ok || enabled != "true" {
-		log.Printf("BanIQ not enabled for container %s, skipping", containerId)
+		log.Printf("BanIQ not enabled for container %s (%s), skipping", containerId[:12], container.Name)
 		return nil
 	}
 
