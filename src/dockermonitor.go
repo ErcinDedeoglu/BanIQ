@@ -1,4 +1,5 @@
 // src/dockermonitor.go
+
 package main
 
 import (
@@ -32,6 +33,7 @@ func NewDockerMonitor(cfg *Config, f2bManager *Fail2BanManager) (*DockerMonitor,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Docker client: %w", err)
 	}
+
 	return &DockerMonitor{
 		client:     cli,
 		f2bManager: f2bManager,
@@ -49,7 +51,6 @@ func (m *DockerMonitor) Start(ctx context.Context) error {
 	filter.Add("event", "destroy")
 
 	// Listen for Docker events
-	// Updated to use the correct type
 	eventsCh, errCh := m.client.Events(ctx, types.EventsOptions{
 		Filters: filter,
 	})
@@ -80,7 +81,6 @@ func (m *DockerMonitor) handleEvent(ctx context.Context, event events.Message) e
 	case "die", "stop", "destroy":
 		return m.handleContainerStop(containerId)
 	}
-
 	return nil
 }
 
@@ -92,7 +92,8 @@ func (m *DockerMonitor) handleContainerStart(ctx context.Context, containerId st
 
 	// Check if BanIQ is enabled for this container
 	if enabled, ok := container.Config.Labels[labelEnabled]; !ok || enabled != "true" {
-		log.Printf("BanIQ not enabled for container %s (%s), skipping", containerId[:12], container.Name)
+		log.Printf("BanIQ not enabled for container %s (%s), skipping",
+			containerId[:12], container.Name)
 		return nil
 	}
 
@@ -105,6 +106,30 @@ func (m *DockerMonitor) handleContainerStart(ctx context.Context, containerId st
 
 	// Apply jail configurations
 	for _, jailConfig := range jailConfigs {
+		// If there's a custom inline filter (failregex is set), create a new filter file
+		if jailConfig.FailRegex != "" {
+			// If no filtername is provided, fallback to the normal jailConfig.Filter
+			customName := jailConfig.CustomFilterName
+			if customName == "" {
+				// if neither is set, generate something, e.g. containerId[:12] + "_" + jailConfig.Name
+				if jailConfig.Filter != "" {
+					customName = jailConfig.Filter
+				} else {
+					customName = containerId[:12] + "_" + jailConfig.Name
+				}
+			}
+			newFilterName, err := m.f2bManager.GenerateCustomFilter(
+				customName,
+				jailConfig.FailRegex,
+				jailConfig.IgnoreRegex,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create custom filter for container %s: %w", containerId, err)
+			}
+			// Override jailConfig.Filter to the newly generated filter name
+			jailConfig.Filter = newFilterName
+		}
+
 		if err := m.f2bManager.AddJail(containerId, jailConfig); err != nil {
 			return fmt.Errorf("failed to add jail for container %s: %w", containerId, err)
 		}
@@ -122,7 +147,6 @@ func (m *DockerMonitor) handleContainerStop(containerId string) error {
 }
 
 func (m *DockerMonitor) ProcessExistingContainers(ctx context.Context) error {
-	// Updated to use the correct type
 	containers, err := m.client.ContainerList(ctx, types.ContainerListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list containers: %w", err)
@@ -133,7 +157,6 @@ func (m *DockerMonitor) ProcessExistingContainers(ctx context.Context) error {
 			log.Printf("Error processing existing container %s: %v", container.ID, err)
 		}
 	}
-
 	return nil
 }
 
@@ -146,7 +169,6 @@ func extractJailConfigs(labels map[string]string, containerName string) []JailCo
 		if !strings.HasPrefix(label, labelPrefix) {
 			continue
 		}
-
 		parts := strings.SplitN(strings.TrimPrefix(label, labelPrefix), ".", 2)
 		if len(parts) != 2 {
 			continue
@@ -154,9 +176,10 @@ func extractJailConfigs(labels map[string]string, containerName string) []JailCo
 
 		jailName := parts[0]
 		if jailName == "enabled" {
+			// skip
 			continue
 		}
-
+		// If we haven't seen this jailName yet, init a JailConfig
 		if _, exists := jails[jailName]; !exists {
 			jails[jailName] = JailConfig{
 				Name:          jailName,
@@ -170,18 +193,16 @@ func extractJailConfigs(labels map[string]string, containerName string) []JailCo
 		if !strings.HasPrefix(label, labelPrefix) {
 			continue
 		}
-
-		label = strings.TrimPrefix(label, labelPrefix)
-		parts := strings.SplitN(label, ".", 2)
+		trimmed := strings.TrimPrefix(label, labelPrefix)
+		parts := strings.SplitN(trimmed, ".", 2)
 		if len(parts) != 2 {
 			continue
 		}
-
 		jailName := parts[0]
 		if jailName == "enabled" {
+			// skip
 			continue
 		}
-
 		property := parts[1]
 		jailConfig := jails[jailName]
 
@@ -189,7 +210,15 @@ func extractJailConfigs(labels map[string]string, containerName string) []JailCo
 		case "logpath":
 			jailConfig.LogPath = value
 		case "filter":
+			// Typically the name of a pre-existing filter
 			jailConfig.Filter = value
+		case "filtername":
+			// Our new custom filter name label
+			jailConfig.CustomFilterName = value
+		case "failregex":
+			jailConfig.FailRegex = value
+		case "ignoreregex":
+			jailConfig.IgnoreRegex = value
 		case "findtime":
 			jailConfig.FindTime = value
 		case "maxretry":
@@ -201,14 +230,15 @@ func extractJailConfigs(labels map[string]string, containerName string) []JailCo
 		case "protocol":
 			jailConfig.Protocol = value
 		}
-
 		jails[jailName] = jailConfig
 	}
 
-	// Convert map to slice
+	// Convert jails map to a slice
 	for _, config := range jails {
-		// Skip incomplete configurations
-		if config.LogPath == "" || config.Filter == "" {
+		// If there's no logpath, it's effectively incomplete
+		// However, you might allow empty logpath if you want
+		// We'll skip if filter and logpath are both blank
+		if config.LogPath == "" && config.Filter == "" && config.FailRegex == "" {
 			log.Printf("Skipping incomplete jail configuration for %s", config.Name)
 			continue
 		}

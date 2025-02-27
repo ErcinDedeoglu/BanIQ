@@ -1,3 +1,5 @@
+// src/fail2ban.go
+
 package main
 
 import (
@@ -19,11 +21,16 @@ type JailConfig struct {
 	BanTime       string
 	Port          string
 	Protocol      string
+
+	// NEW FIELDS for inline filters
+	CustomFilterName string
+	FailRegex        string
+	IgnoreRegex      string
 }
 
 type Fail2BanManager struct {
 	config         *Config
-	containerJails map[string][]string // maps container ID to jail names
+	containerJails map[string][]string // maps container ID to jail conf file names
 	mu             sync.Mutex
 }
 
@@ -38,6 +45,32 @@ func NewFail2BanManager(cfg *Config) (*Fail2BanManager, error) {
 		containerJails: make(map[string][]string),
 		mu:             sync.Mutex{},
 	}, nil
+}
+
+// GenerateCustomFilter writes an inline filter specification to /etc/fail2ban/filter.d/<filterName>.conf
+func (m *Fail2BanManager) GenerateCustomFilter(filterName string, failRegex string, ignoreRegex string) (string, error) {
+	// If no filterName or failRegex, skip
+	if filterName == "" || failRegex == "" {
+		return "", nil
+	}
+	// The path for the new filter
+	filterFilePath := filepath.Join(m.config.Fail2BanFilterDir, filterName+".conf")
+
+	// Build the file contents
+	filterContent := "[Definition]\n"
+	filterContent += fmt.Sprintf("failregex = %s\n", failRegex)
+	if ignoreRegex != "" {
+		filterContent += fmt.Sprintf("ignoreregex = %s\n", ignoreRegex)
+	}
+
+	// Write the file
+	err := os.WriteFile(filterFilePath, []byte(filterContent), 0644)
+	if err != nil {
+		return "", fmt.Errorf("failed to write custom filter file: %w", err)
+	}
+
+	log.Printf("Created custom filter file %s for inline filter: %s", filterFilePath, filterName)
+	return filterName, nil
 }
 
 func (m *Fail2BanManager) AddJail(containerId string, jailConfig JailConfig) error {
@@ -65,7 +98,7 @@ func (m *Fail2BanManager) AddJail(containerId string, jailConfig JailConfig) err
 	jailFileName := fmt.Sprintf("%s-%s.conf", containerId[:12], jailConfig.Name)
 	jailFilePath := filepath.Join(m.config.Fail2BanJailDir, jailFileName)
 
-	// Create jail configuration
+	// Create jail configuration content
 	jailContent := fmt.Sprintf(`
 [%s]
 enabled = true
@@ -100,7 +133,7 @@ protocol = %s
 		return fmt.Errorf("failed to reload Fail2Ban: %w", err)
 	}
 
-	log.Printf("Added jail %s for container %s", jailConfig.Name, containerId)
+	log.Printf("Added jail %s for container %s (filter=%s)", jailConfig.Name, containerId[:12], jailConfig.Filter)
 	return nil
 }
 
@@ -129,7 +162,7 @@ func (m *Fail2BanManager) RemoveJailsForContainer(containerId string) error {
 		return fmt.Errorf("failed to reload Fail2Ban: %w", err)
 	}
 
-	log.Printf("Removed jails for container %s", containerId)
+	log.Printf("Removed jails for container %s", containerId[:12])
 	return nil
 }
 
